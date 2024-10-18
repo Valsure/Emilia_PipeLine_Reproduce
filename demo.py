@@ -1,13 +1,14 @@
 import os
 from pprint import pprint
-
 from pydub import AudioSegment
 import numpy as np
-
 import pandas as pd
 from pyannote.audio import Pipeline
-
-import os
+from spleeter.separator import Separator
+import ffmpeg
+import numpy as np
+import librosa
+import io
 import torch
 import silero_vad
 def detect_gpu():
@@ -57,11 +58,10 @@ def standardization(audio):
     # Convert the audio file to WAV format
     audio = audio.set_frame_rate(24000)
     audio = audio.set_sample_width(2)  # Set bit depth to 16bit
-    audio = audio.set_channels(1)  # Set to mono
+    audio = audio.set_channels(1)
 
     print("Audio file converted to WAV format")
 
-    # Calculate the gain to be applied
     target_dBFS = -20
     gain = target_dBFS - audio.dBFS
     print(f"Calculating the gain needed for the audio: {gain} dB")
@@ -82,28 +82,64 @@ def standardization(audio):
         "sample_rate": 24000,
     }
 
+
+def vocal_extraction(audio):
+    """
+    Spleeter接受的音频输入为双声道，而前面的standardization返回的是单声道，
+    因此在此函数中先转成双声道，完成人声分离后再转回单声道
+    """
+    if isinstance(audio, dict) and "waveform" in audio:
+        waveform = audio["waveform"]
+        # 将单声道 waveform 转换为双声道
+        stereo_waveform = np.stack([waveform, waveform], axis=1)
+
+        separator = Separator('spleeter:2stems')
+        try:
+            result = separator.separate(stereo_waveform)
+            vocals = result['vocals']
+            print(f"人声分离成功：{audio['name']}")
+
+            if vocals.shape[1] == 2:
+                # 对两个声道求平均，得到单声道
+                mono_vocals = np.mean(vocals, axis=1)
+                return mono_vocals
+            else:
+                return vocals
+        except Exception as e:
+            print(e, f"人声分离失败：{audio['name']}")
+            return None
+    else:
+        raise ValueError("Invalid audio format for vocal extraction")
+
 def speaker_diarization(audio):
-    waveform = torch.tensor(audio["waveform"]).to(device)
-    waveform = torch.unsqueeze(waveform, 0)
+    if audio is None:
+        print("音频为空，无法进行分段")
+        return None
 
-    segments = diarization_pipeline(
-        {
-            "waveform": waveform,
-            "sample_rate": audio["sample_rate"],
-            "channel": 0,
-        }
-    )
+    waveform = torch.tensor(audio).unsqueeze(0).to(device)
 
-    diarize_df = pd.DataFrame(
-        segments.itertracks(yield_label=True),
-        columns=["segment", "label", "speaker"],
-    )
-    diarize_df["start"] = diarize_df["segment"].apply(lambda x: x.start)
-    diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
+    try:
+        segments = diarization_pipeline(
+            {
+                "waveform": waveform,
+                "sample_rate": 24000,
+            }
+        )
 
-    print(f"diarize_df: {diarize_df}")
+        # 将分段结果转换为 DataFrame
+        diarize_df = pd.DataFrame(
+            segments.itertracks(yield_label=True),
+            columns=["segment", "label", "speaker"],
+        )
+        diarize_df["start"] = diarize_df["segment"].apply(lambda x: x.start)
+        diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
 
-    return diarize_df
+        print(f"说话人分段完成: {diarize_df}")
+        return diarize_df
+    except Exception as e:
+        print(f"说话人分段失败: {e}")
+        return None
+
 
 def cut_by_speaker_label(vad_list):
 
@@ -155,15 +191,24 @@ def cut_by_speaker_label(vad_list):
     ]
 
     print(f"移除： {len(updated_list) - len(filter_list)} segments by length")
-
-    return filter_list
+    filter_list_df = pd.DataFrame(filter_list)
+    return filter_list_df
 
 def main(audio_file):
     audio = standardization(audio_file)
-    speakerdia = speaker_diarization(audio)
-    vad_list = vad.vad(speakerdia, audio)
-    segment_list = cut_by_speaker_label(vad_list)
-    pprint(segment_list)
+    vocal = vocal_extraction(audio)  # 提取人声部分
+    if vocal is not None:
+        speakerdia = speaker_diarization(vocal)  # 进行说话人分段
+        if speakerdia is not None:
+            vad_list = vad.vad(speakerdia, vocal)  # 音频活动（说话人）检测
+            pprint( vad_list)
+            segment_list = cut_by_speaker_label(vad_list)
+            pprint(segment_list)
+        else:
+            print("说话人分段失败")
+    else:
+        print("人声分离失败")
+
 
 if __name__ == "__main__":
     if detect_gpu():

@@ -1,51 +1,185 @@
-import pandas as pd
-import torch
-import silero_vad
-from scipy.io import wavfile
+
+import os
+from pprint import pprint
+
+from pydub import AudioSegment
 import numpy as np
+
+import pandas as pd
 from pyannote.audio import Pipeline
 
-# 加载 Silero VAD 模型
-vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=True)
-get_speech_ts = utils[0]  # 获取 VAD 中的 get_speech_timestamps 函数
+import os
+import torch
+import silero_vad
+def detect_gpu():
+    """Detect if GPU is available and print related information."""
 
-vad = silero_vad.load_silero_vad()
+    if "CUDA_VISIBLE_DEVICES" not in os.environ:
+        print("ENV: CUDA_VISIBLE_DEVICES not set, use default setting")
+    else:
+        gpu_id = os.environ["CUDA_VISIBLE_DEVICES"]
+        print(f"ENV: CUDA_VISIBLE_DEVICES = {gpu_id}")
 
-# 加载 Pyannote 的 Speaker Diarization 模型
-pipeline = Pipeline.from_pretrained(
-    "pyannote/speaker-diarization-3.1",
-    use_auth_token="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"
-)
+    if not torch.cuda.is_available():
+        print("Torch CUDA: No GPU detected. torch.cuda.is_available() = False.")
+        return False
 
-# 加载音频文件
-sample_rate, wav_data = wavfile.read("audio1.wav")
+    num_gpus = torch.cuda.device_count()
+    print(f"Torch CUDA: Detected {num_gpus} GPUs.")
+    for i in range(num_gpus):
+        gpu_name = torch.cuda.get_device_name(i)
+        print(f" * GPU {i}: {gpu_name}")
 
-# 如果音频是立体声（2通道），将其转换为单声道
-if len(wav_data.shape) > 1:
-    wav_data = np.mean(wav_data, axis=1).astype(np.int16)  # 平均两个声道，转换为单声道
+    print("Torch: CUDNN version = " + str(torch.backends.cudnn.version()))
+    if not torch.backends.cudnn.is_available():
+        print("Torch: CUDNN is not available.")
+        return False
+    print("Torch: CUDNN is available.")
 
-# 先进行 Speaker Diarization（说话人分离）
-diarization = pipeline("audio1.wav")
+    return True
 
-# 初始化用于保存分离结果和 VAD 结果的数据
-data = []
 
-# 遍历 diarization 的输出，逐个处理每个说话人的段落
-for turn, _, speaker in diarization.itertracks(yield_label=True):
-    start, end = int(turn.start * sample_rate), int(turn.end * sample_rate)
-    segment_wav = wav_data[start:end]  # 获取说话人段落的音频数据
+def standardization(audio):
 
-    # 对这个说话人段落使用 Silero VAD 进行语音活动检测
-    speech_timestamps = get_speech_ts(segment_wav, vad_model, sampling_rate=sample_rate)
+    global audio_count
+    name = "audio"
 
-    # 如果这个段落中有语音活动，保存结果
-    if speech_timestamps:
-        for ts in speech_timestamps:
-            segment = f"{turn.start + ts['start'] / sample_rate:.1f}s - {turn.start + ts['end'] / sample_rate:.1f}s"
-            data.append([segment, "speech", speaker])
+    if isinstance(audio, str):
+        name = os.path.basename(audio)
+        audio = AudioSegment.from_file(audio)
+    elif isinstance(audio, AudioSegment):
+        name = f"audio_{audio_count}"
+        audio_count += 1
+    else:
+        raise ValueError("Invalid audio type")
 
-# 将数据转换为 DataFrame
-df = pd.DataFrame(data, columns=["segment", "label", "speaker"])
+    print("Entering the preprocessing of audio")
 
-# 保存为 CSV 文件
-df.to_csv("diarization_vad_output.csv", index=False)
+    # Convert the audio file to WAV format
+    audio = audio.set_frame_rate(24000)
+    audio = audio.set_sample_width(2)  # Set bit depth to 16bit
+    audio = audio.set_channels(1)  # Set to mono
+
+    print("Audio file converted to WAV format")
+
+    # Calculate the gain to be applied
+    target_dBFS = -20
+    gain = target_dBFS - audio.dBFS
+    print(f"Calculating the gain needed for the audio: {gain} dB")
+
+    # Normalize volume and limit gain range to between -3 and 3
+    normalized_audio = audio.apply_gain(min(max(gain, -3), 3))
+
+    waveform = np.array(normalized_audio.get_array_of_samples(), dtype=np.float32)
+    max_amplitude = np.max(np.abs(waveform))
+    waveform /= max_amplitude  # Normalize
+
+    print(f"waveform shape: {waveform.shape}")
+    print("waveform in np ndarray, dtype=" + str(waveform.dtype))
+
+    return {
+        "waveform": waveform,
+        "name": name,
+        "sample_rate": 24000,
+    }
+
+def speaker_diarization(audio):
+    waveform = torch.tensor(audio["waveform"]).to(device)
+    waveform = torch.unsqueeze(waveform, 0)
+
+    segments = diarization_pipeline(
+        {
+            "waveform": waveform,
+            "sample_rate": audio["sample_rate"],
+            "channel": 0,
+        }
+    )
+
+    diarize_df = pd.DataFrame(
+        segments.itertracks(yield_label=True),
+        columns=["segment", "label", "speaker"],
+    )
+    diarize_df["start"] = diarize_df["segment"].apply(lambda x: x.start)
+    diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
+
+    print(f"diarize_df: {diarize_df}")
+
+    return diarize_df
+
+def cut_by_speaker_label(vad_list):
+
+    MERGE_GAP = 2  # merge gap in seconds, if smaller than this, merge
+    MIN_SEGMENT_LENGTH = 3  # min segment length in seconds
+    MAX_SEGMENT_LENGTH = 30  # max segment length in seconds
+
+    updated_list = []
+
+    for idx, vad in enumerate(vad_list):
+        last_start_time = updated_list[-1]["start"] if updated_list else None
+        last_end_time = updated_list[-1]["end"] if updated_list else None
+        last_speaker = updated_list[-1]["speaker"] if updated_list else None
+
+        if vad["end"] - vad["start"] >= MAX_SEGMENT_LENGTH:
+            current_start = vad["start"]
+            segment_end = vad["end"]
+            print("segment长度大于 30s，裁切为 30s 以内")
+            while segment_end - current_start >= MAX_SEGMENT_LENGTH:
+                vad["end"] = current_start + MAX_SEGMENT_LENGTH
+                updated_list.append(vad)
+                vad = vad.copy()
+                current_start += MAX_SEGMENT_LENGTH
+                vad["start"] = current_start
+                vad["end"] = segment_end
+            updated_list.append(vad)
+            continue
+
+        if (
+            last_speaker is None
+            or last_speaker!= vad["speaker"]
+            or vad["end"] - vad["start"] >= MIN_SEGMENT_LENGTH
+        ):
+            updated_list.append(vad)
+            continue
+
+        if (
+            vad["start"] - last_end_time >= MERGE_GAP
+            or vad["end"] - last_start_time >= MAX_SEGMENT_LENGTH
+        ):
+            updated_list.append(vad)
+        else:
+            updated_list[-1]["end"] = vad["end"]  # merge the time
+
+    print(f"合并： {len(vad_list) - len(updated_list)} segments")
+
+    filter_list = [
+        vad for vad in updated_list if vad["end"] - vad["start"] >= MIN_SEGMENT_LENGTH
+    ]
+
+    print(f"移除： {len(updated_list) - len(filter_list)} segments by length")
+
+    return filter_list
+
+def main(audio_file):
+    audio = standardization(audio_file)
+    speakerdia = speaker_diarization(audio)
+    vad_list = vad.vad(speakerdia, audio)
+    segment_list = cut_by_speaker_label(vad_list)
+    pprint(segment_list)
+
+if __name__ == "__main__":
+    if detect_gpu():
+        print("使用GPU")
+        device_name = "cuda"
+        device = torch.device(device_name)
+    else:
+        print("使用CPU")
+        device_name = "cpu"
+        device = torch.device(device_name)
+
+    diarization_pipeline = Pipeline.from_pretrained(
+      "pyannote/speaker-diarization-3.1",
+      use_auth_token="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")
+
+    diarization_pipeline.to(device)
+    vad = silero_vad.SileroVAD(device=device)
+    main("audio1.wav")

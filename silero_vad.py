@@ -110,8 +110,8 @@ class SileroVAD:
         Returns:
             list: A list of dictionaries containing processed audio segments with start, end, and speaker.
         """
-        sampling_rate = audio["sample_rate"]
-        audio_data = audio["waveform"]
+        sampling_rate = 24000
+        audio_data = audio
 
         out = []
         last_end = 0
