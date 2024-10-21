@@ -11,6 +11,7 @@ import librosa
 import io
 import torch
 import silero_vad
+import whisper_asr
 def detect_gpu():
     """Detect if GPU is available and print related information."""
 
@@ -192,22 +193,122 @@ def cut_by_speaker_label(vad_list):
 
     print(f"移除： {len(updated_list) - len(filter_list)} segments by length")
     filter_list_df = pd.DataFrame(filter_list)
-    return filter_list_df
+    return filter_list
+
+def asr(vad_segments, audio):
+    """
+    Perform Automatic Speech Recognition (ASR) on the VAD segments of the given audio.
+
+    Args:
+        vad_segments (list): List of VAD segments with start and end times.
+        audio (dict): A dictionary containing the audio waveform and sample rate.
+
+    Returns:
+        list: A list of ASR results with transcriptions and language details.
+    """
+    if len(vad_segments) == 0:
+        return []
+    # 提取音频片段并计算帧，通过采样率将时间转为帧索引
+    temp_audio = audio["waveform"]
+    start_time = vad_segments[0]["start"]
+    end_time = vad_segments[-1]["end"]
+    start_frame = int(start_time * audio["sample_rate"])
+    end_frame = int(end_time * audio["sample_rate"])
+    temp_audio = temp_audio[start_frame:end_frame]  # 去掉首尾的空白音频
+
+    # 将每一个segment的绝对时间戳变为相对于第一个VAD片段的相对时间戳，可以简化后续流程
+    for idx, segment in enumerate(vad_segments):
+        vad_segments[idx]["start"] -= start_time
+        vad_segments[idx]["end"] -= start_time
+
+    # 因为ASR普遍支持16k的采样率，因此这里从24k转到16k
+    temp_audio = librosa.resample(
+        temp_audio, orig_sr=audio["sample_rate"], target_sr=16000
+    )
+
+    if multilingual_flag:# 包含多种语言
+        print("Multilingual flag is on")
+        valid_vad_segments, valid_vad_segments_language = [], []
+        # 对合法的segments进行进一步处理
+        for idx, segment in enumerate(vad_segments):
+            start_frame = int(segment["start"] * 16000)
+            end_frame = int(segment["end"] * 16000)
+            segment_audio = temp_audio[start_frame:end_frame]
+            language, prob = asr_model.detect_language(segment_audio)
+            # 1. if language is in supported list, 2. if prob > 0.8
+            if language in supported_languages and prob > 0.8:
+                valid_vad_segments.append(vad_segments[idx])
+                valid_vad_segments_language.append(language)
+
+        if len(valid_vad_segments) == 0:
+            return []
+        all_transcribe_result = []
+        print(f"valid_vad_segments_language: {valid_vad_segments_language}")
+        unique_languages = list(set(valid_vad_segments_language))
+        print(f"unique_languages: {unique_languages}")
+        for language_token in unique_languages:
+            language = language_token
+            # 过滤出包含多种语言的segments
+            vad_segments = [
+                valid_vad_segments[i]
+                for i, x in enumerate(valid_vad_segments_language)
+                if x == language
+            ]
+            transcribe_result_temp = asr_model.transcribe(
+                temp_audio,
+                vad_segments,
+                batch_size=16,
+                language=language,
+                print_progress=True,
+            )
+            result = transcribe_result_temp["segments"]
+            for idx, segment in enumerate(result):
+                result[idx]["start"] += start_time
+                result[idx]["end"] += start_time
+                result[idx]["language"] = transcribe_result_temp["language"]
+            all_transcribe_result.extend(result)
+        # sort by start time
+        all_transcribe_result = sorted(all_transcribe_result, key=lambda x: x["start"])
+        return all_transcribe_result
+    else:
+        # 单语言
+        print("Multilingual flag is off")
+        language, prob = asr_model.detect_language(temp_audio)
+        if language in supported_languages and prob > 0.8:
+            transcribe_result = asr_model.transcribe(
+                temp_audio,
+                vad_segments,
+                batch_size=16,
+                language=language,
+                print_progress=True,
+            )
+            result = transcribe_result["segments"]
+            for idx, segment in enumerate(result):
+                result[idx]["start"] += start_time
+                result[idx]["end"] += start_time
+                result[idx]["language"] = transcribe_result["language"]
+            return result
+        else:
+            return []
+
+
 
 def main(audio_file):
     audio = standardization(audio_file)
     vocal = vocal_extraction(audio)  # 提取人声部分
-    if vocal is not None:
-        speakerdia = speaker_diarization(vocal)  # 进行说话人分段
-        if speakerdia is not None:
-            vad_list = vad.vad(speakerdia, vocal)  # 音频活动（说话人）检测
-            pprint( vad_list)
-            segment_list = cut_by_speaker_label(vad_list)
-            pprint(segment_list)
-        else:
-            print("说话人分段失败")
-    else:
+    if vocal is None:
         print("人声分离失败")
+        return 0
+    speakerdia = speaker_diarization(vocal)  # 进行说话人分段
+    if speakerdia is None:
+        print("说话人分段失败")
+        return 0
+    vad_list = vad.vad(speakerdia, vocal)  # 音频活动（说话人）检测
+    # pprint( vad_list)
+    segment_list = cut_by_speaker_label(vad_list)
+    print('segment_list: ', segment_list)
+    asr_result = asr(segment_list, audio)
+    print('asr_result: ', asr_result)
 
 
 if __name__ == "__main__":
@@ -226,4 +327,24 @@ if __name__ == "__main__":
 
     diarization_pipeline.to(device)
     vad = silero_vad.SileroVAD(device=device)
+
+    multilingual_flag = 'true'
+    supported_languages = [
+            "zh",
+            "en",
+            "fr",
+            "ja",
+            "ko",
+            "de"
+        ]
+    asr_model = whisper_asr.load_asr_model(
+        'medium',
+        device_name,
+        compute_type='float32',
+        threads=4,
+        asr_options={
+            "initial_prompt": "Um, Uh, Ah. Like, you know. I mean, right. Actually. Basically, and right? okay. Alright. Emm. So. Oh. 生于忧患,死于安乐。岂不快哉?当然,嗯,呃,就,这样,那个,哪个,啊,呀,哎呀,哎哟,唉哇,啧,唷,哟,噫!微斯人,吾谁与归?ええと、あの、ま、そう、ええ。äh, hm, so, tja, halt, eigentlich. euh, quoi, bah, ben, tu vois, tu sais, t'sais, eh bien, du coup. genre, comme, style. 응,어,그,음."
+        },
+    )
+
     main("audio1.wav")
