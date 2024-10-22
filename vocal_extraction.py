@@ -58,6 +58,6 @@ def main(mp4_file, output_wav):
 
 
 # 输入视频文件路径和输出 WAV 文件路径
-mp4_file = 'audio1.wav'
+mp4_file = 'audio_samples/audio1.wav'
 output_wav = 'vocals_output1.wav'
 vocals = main(mp4_file, output_wav)

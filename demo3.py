@@ -108,9 +108,9 @@ def speaker_diarization(audio):
 
 def cut_by_speaker_label(vad_list):
 
-    MERGE_GAP = 2  # merge gap in seconds, if smaller than this, merge
-    MIN_SEGMENT_LENGTH = 3  # min segment length in seconds
-    MAX_SEGMENT_LENGTH = 30  # max segment length in seconds
+    MERGE_GAP = 2  # 如果两段segment的间隔低于这个值，则合并
+    MIN_SEGMENT_LENGTH = 3  # 最短的segment时长
+    MAX_SEGMENT_LENGTH = 30  # 最长的segment时长
 
     updated_list = []
 
@@ -147,7 +147,7 @@ def cut_by_speaker_label(vad_list):
         ):
             updated_list.append(vad)
         else:
-            updated_list[-1]["end"] = vad["end"]  # merge the time
+            updated_list[-1]["end"] = vad["end"]
 
     print(f"合并： {len(vad_list) - len(updated_list)} segments")
 
@@ -182,4 +182,4 @@ if __name__ == "__main__":
 
     diarization_pipeline.to(device)
     vad = silero_vad.SileroVAD(device=device)
-    main("audio1.wav")
+    main("audio_samples/audio1.wav")

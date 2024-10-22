@@ -1,4 +1,6 @@
-
+import warnings
+from typing import Callable
+import utils_vad
 import librosa
 import torch
 import numpy as np
@@ -8,13 +10,12 @@ model_dir = 'silero_vad.jit'
 VAD_THRESHOLD = 20
 SAMPLING_RATE = 16000
 
-
 class SileroVAD:
     """
     Voice Activity Detection (VAD) using Silero-VAD.
     """
 
-    def __init__(self, local=False, model="silero_vad", device=torch.device("cpu")):
+    def __init__(self, local=True, model="silero_vad", device=torch.device("cpu")):
         """
         Initialize the VAD object.
 
@@ -33,6 +34,9 @@ class SileroVAD:
             # 从本地加载模型
             self.vad_model = torch.jit.load(model_dir, map_location=device)
             self.vad_model.eval()  # 设置为评估模式
+
+            self.get_speech_timestamps = utils_vad.get_speech_timestamps
+
         except Exception as e:
             raise RuntimeError(f"Failed to load VAD model from {model_dir}: {e}")
 
@@ -110,8 +114,8 @@ class SileroVAD:
         Returns:
             list: A list of dictionaries containing processed audio segments with start, end, and speaker.
         """
-        sampling_rate = 24000
-        audio_data = audio
+        sampling_rate = audio["sample_rate"]
+        audio_data = audio["waveform"]
 
         out = []
         last_end = 0

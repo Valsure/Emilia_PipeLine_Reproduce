@@ -144,9 +144,9 @@ def speaker_diarization(audio):
 
 def cut_by_speaker_label(vad_list):
 
-    MERGE_GAP = 2  # merge gap in seconds, if smaller than this, merge
-    MIN_SEGMENT_LENGTH = 3  # min segment length in seconds
-    MAX_SEGMENT_LENGTH = 30  # max segment length in seconds
+    MERGE_GAP = 2  # 如果两段segment的间隔低于这个值，则合并
+    MIN_SEGMENT_LENGTH = 3  # 最短的segment时长
+    MAX_SEGMENT_LENGTH = 30  # 最长的segment时长
 
     updated_list = []
 
@@ -183,7 +183,7 @@ def cut_by_speaker_label(vad_list):
         ):
             updated_list.append(vad)
         else:
-            updated_list[-1]["end"] = vad["end"]  # merge the time
+            updated_list[-1]["end"] = vad["end"]
 
     print(f"合并： {len(vad_list) - len(updated_list)} segments")
 
@@ -196,16 +196,6 @@ def cut_by_speaker_label(vad_list):
     return filter_list
 
 def asr(vad_segments, audio):
-    """
-    Perform Automatic Speech Recognition (ASR) on the VAD segments of the given audio.
-
-    Args:
-        vad_segments (list): List of VAD segments with start and end times.
-        audio (dict): A dictionary containing the audio waveform and sample rate.
-
-    Returns:
-        list: A list of ASR results with transcriptions and language details.
-    """
     if len(vad_segments) == 0:
         return []
     # 提取音频片段并计算帧，通过采样率将时间转为帧索引
@@ -235,7 +225,7 @@ def asr(vad_segments, audio):
             end_frame = int(segment["end"] * 16000)
             segment_audio = temp_audio[start_frame:end_frame]
             language, prob = asr_model.detect_language(segment_audio)
-            # 1. if language is in supported list, 2. if prob > 0.8
+            # 检测到的语言在支持的列表中且置信度大于0.8
             if language in supported_languages and prob > 0.8:
                 valid_vad_segments.append(vad_segments[idx])
                 valid_vad_segments_language.append(language)
@@ -347,4 +337,4 @@ if __name__ == "__main__":
         },
     )
 
-    main("audio1.wav")
+    main("audio_samples/audio1.wav")

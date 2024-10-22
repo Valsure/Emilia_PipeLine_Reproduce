@@ -12,7 +12,7 @@ vad_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='sile
 get_speech_ts = utils[0]  # get_speech_timestamps 是元组的第一个元素
 
 # 加载音频文件
-sample_rate, wav_data = wavfile.read("audio1.wav")
+sample_rate, wav_data = wavfile.read("audio_samples/audio1.wav")
 
 # 如果音频是立体声（2通道），将其转换为单声道
 if len(wav_data.shape) > 1:

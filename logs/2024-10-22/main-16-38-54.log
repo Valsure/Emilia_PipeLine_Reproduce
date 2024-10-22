@@ -1,0 +1,2 @@
+2024-10-22 16:38:54,019 - main - INFO - ENV: CUDA_VISIBLE_DEVICES not set, use default setting
+2024-10-22 16:38:54,020 - main - ERROR - Torch CUDA: No GPU detected. torch.cuda.is_available() = False.
