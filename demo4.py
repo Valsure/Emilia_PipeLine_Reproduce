@@ -1,20 +1,18 @@
+import json
 import os
-from pprint import pprint
+import time
+
 from pydub import AudioSegment
-import numpy as np
 import pandas as pd
 from pyannote.audio import Pipeline
 from spleeter.separator import Separator
-import ffmpeg
 import numpy as np
 import librosa
-import io
 import torch
 from tqdm import tqdm
-from logger import Logger, time_logger
 import silero_vad, whisper_asr, dnsmos
-from tool import detect_gpu, calculate_audio_stats
-
+from tool import detect_gpu, calculate_audio_stats, export_to_mp3
+from scipy.io.wavfile import write
 def standardization(audio):
 
     global audio_count
@@ -52,6 +50,11 @@ def standardization(audio):
     print(f"waveform shape: {waveform.shape}")
     print("waveform in np ndarray, dtype=" + str(waveform.dtype))
 
+    #将音频数据保存为wav文件
+    output_file = f"outputs_in_progress/step1_standardized.wav"
+    write(output_file, 24000, waveform)
+    print("step1: 标准化的音频已保存为wav文件")
+
     return {
         "waveform": waveform,
         "name": name,
@@ -77,10 +80,17 @@ def vocal_extraction(audio):
             vocal = {}
             vocal["waveform"] = vocals
             vocal["sample_rate"] = audio["sample_rate"]
+            vocal["name"] = audio["name"]
             if vocals.shape[1] == 2:
                 # 对两个声道求平均，得到单声道
                 mono_vocals = np.mean(vocal["waveform"], axis=1)
                 vocal["waveform"] = mono_vocals
+
+            #将提取的人声保存为wav文件
+            output_file = f"outputs_in_progress/step2_vocal.wav"
+            write(output_file, 24000, vocal["waveform"])
+            print("step2: 人声已保存为wav文件")
+
             return vocal
         except Exception as e:
             print(e, f"人声分离失败：{audio['name']}")
@@ -111,8 +121,11 @@ def speaker_diarization(audio):
         )
         diarize_df["start"] = diarize_df["segment"].apply(lambda x: x.start)
         diarize_df["end"] = diarize_df["segment"].apply(lambda x: x.end)
-
         print(f"说话人分段完成: {diarize_df}")
+
+        #将分段结果保存为excel文件
+        diarize_df.to_excel(f"outputs_in_progress/step3_diarization.xlsx", index=False)
+        print("step3: 分段结果保存为excel文件")
         return diarize_df
     except Exception as e:
         print(f"说话人分段失败: {e}")
@@ -169,7 +182,11 @@ def cut_by_speaker_label(vad_list):
     ]
 
     print(f"移除： {len(updated_list) - len(filter_list)} segments by length")
+
+    # 将基于VAD的细粒度分割结果保存为excel文件
     filter_list_df = pd.DataFrame(filter_list)
+    filter_list_df.to_excel(f"outputs_in_progress/step4_VAD.xlsx", index=False)
+    print("step4: 基于VAD的细粒度分割结果已保存为excel文件")
     return filter_list
 
 def asr(vad_segments, audio):
@@ -285,9 +302,14 @@ def mos_prediction(audio, vad_list):
 
     predict_dnsmos = np.mean([vad["dnsmos"] for vad in vad_list])
 
+    #保存经过MOS计算后的结果为excel文件
+    vad_list_df = pd.DataFrame(vad_list)
+    vad_list_df.to_excel(f"outputs_in_progress/step6_MOS.xlsx", index=False)
+    print("step6：MOS计算后的结果已保存为excel文件")
+
     return predict_dnsmos, vad_list
 
-def filter(mos_list):
+def filter(mos_list, dnsmos):
     """
     过滤掉具有 MOS 得分、wrong char duration和total duration的片段。
     args：
@@ -295,17 +317,23 @@ def filter(mos_list):
     return：
     列表：一个包含 MOS 得分高于平均 MOS 的 VAD 片段的列表。
     """
-    filtered_audio_stats, all_audio_stats = calculate_audio_stats(mos_list)
+    filtered_audio_stats, all_audio_stats = calculate_audio_stats(mos_list, dnsmos)
     filtered_segment = len(filtered_audio_stats)
     all_segment = len(all_audio_stats)
     print(
         f"> {all_segment - filtered_segment}/{all_segment} {(all_segment - filtered_segment) / all_segment:.2%} 的segments被过滤"
     )
     filtered_list = [mos_list[idx] for idx, _ in filtered_audio_stats]
+
+    #保存过滤后的结果为excel文件
+    filtered_list_df = pd.DataFrame(filtered_list)
+    filtered_list_df.to_excel(f"outputs_in_progress/step7_filtered.xlsx", index=False)
+    print("step7：过滤后的结果已保存为excel文件")
+
     return filtered_list
 
 
-def main(audio_file):
+def main(audio_file, save_path, audio_name):
     audio = standardization(audio_file)
     vocal = vocal_extraction(audio)  # 提取人声部分
     if vocal is None:
@@ -320,16 +348,28 @@ def main(audio_file):
     segment_list = cut_by_speaker_label(vad_list)
     print('segment_list: ', segment_list)
     asr_result = asr(segment_list, vocal)
+
+    asr_result_df = pd.DataFrame(asr_result)
+    asr_result_df.to_excel(f"outputs_in_progress/step5_ASR.xlsx", index=False)
+    print("step5: ASR结果已保存为excel文件")
+
     print('asr_result: ', asr_result)
     avg_mos, mos_list = mos_prediction(vocal, asr_result)
     print("平均MOS预测值为：", avg_mos)
-    filtered_list = filter(mos_list)
-    print("已过滤掉低于平均MOS值的片段")
+    filtered_list = filter(mos_list, avg_mos)
+    print("已按各种条件过滤掉不合格的片段")
     print("过滤后的片段：", filtered_list)
     total_time_after_filter = 0
     for item in filtered_list:
         total_time_after_filter += item["end"] - item["start"]
     print("过滤后的总时长：", total_time_after_filter)
+
+    print("Step 8: 将结果写入MP3和JSON")
+    export_to_mp3(audio, filtered_list, save_path, audio_name)
+
+    final_path = os.path.join(save_path, audio_name + ".json")
+    with open(final_path, "w") as f:
+        json.dump(filtered_list, f, ensure_ascii=False)
 
 if __name__ == "__main__":
     if detect_gpu():
@@ -372,4 +412,4 @@ if __name__ == "__main__":
     mos_model_path = 'sig_bak_ovr.onnx'
     dnsmos_compute_score = dnsmos.ComputeScore(mos_model_path, device_name)
 
-    main("audio_samples/audio1.wav")
+    main("audio_samples/audio3.mp4", "outputs_in_progress/final_results", "audio3")

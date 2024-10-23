@@ -216,7 +216,7 @@ def export_to_mp3(audio, asr_result, folder_path, file_name):
 
         # Wait for all threads to complete
         for future in tqdm.tqdm(
-            futures, total=len(asr_result), desc="Exporting to MP3"
+            futures, total=len(asr_result), desc="导出为 MP3"
         ):
             future.result()
 
@@ -255,7 +255,7 @@ def get_char_count(text):
 
 
 def calculate_audio_stats(
-    data, min_duration=3, max_duration=30, min_dnsmos=3, min_char_count=2
+    data,  min_dnsmos, min_duration=3, max_duration=30, min_char_count=2
 ):
     """
     Reading the proviced json, calculate and return the audio ID and their duration that meet the given filtering criteria.

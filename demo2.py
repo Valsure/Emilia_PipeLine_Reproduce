@@ -46,4 +46,4 @@ for turn, _, speaker in diarization.itertracks(yield_label=True):
 df = pd.DataFrame(data, columns=["segment", "label", "speaker"])
 
 # 保存为 CSV 文件
-df.to_csv("diarization_vad_output.csv", index=False)
+# df.to_csv("diarization_vad_output.csv", index=False)
