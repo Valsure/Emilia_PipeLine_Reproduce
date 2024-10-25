@@ -189,9 +189,39 @@ def check_env(logger):
     logger.debug(f"ENV: PATH = {environ_path}, LD_LIBRARY_PATH = {environ_ld_library}")
 
 
-@time_logger
+# @time_logger
+# def export_to_mp3(audio, asr_result, folder_path, file_name):
+#     """Export segmented audio to MP3 files."""
+#     sr = audio["sample_rate"]
+#     audio = audio["waveform"]
+#
+#     os.makedirs(folder_path, exist_ok=True)
+#
+#     # Function to process each segment in a separate thread
+#     def process_segment(idx, segment):
+#         start, end = int(segment["start"] * sr), int(segment["end"] * sr)
+#         split_audio = audio[start:end]
+#         split_audio = librosa.to_mono(split_audio)
+#         out_file = f"{file_name}_{idx}.mp3"
+#         out_path = os.path.join(folder_path, out_file)
+#         write_mp3(out_path, sr, split_audio)
+#
+#     # Use ThreadPoolExecutor for concurrent execution
+#     with ThreadPoolExecutor(max_workers=72) as executor:
+#         # Submit each segment processing as a separate thread
+#         futures = [
+#             executor.submit(process_segment, idx, segment)
+#             for idx, segment in enumerate(asr_result)
+#         ]
+#
+#         # Wait for all threads to complete
+#         for future in tqdm.tqdm(
+#             futures, total=len(asr_result), desc="导出为 MP3"
+#         ):
+#             future.result()
+
 def export_to_mp3(audio, asr_result, folder_path, file_name):
-    """Export segmented audio to MP3 files."""
+    """Export segmented audio to MP3 files and add audio file names to asr_result."""
     sr = audio["sample_rate"]
     audio = audio["waveform"]
 
@@ -204,7 +234,11 @@ def export_to_mp3(audio, asr_result, folder_path, file_name):
         split_audio = librosa.to_mono(split_audio)
         out_file = f"{file_name}_{idx}.mp3"
         out_path = os.path.join(folder_path, out_file)
+
+        # Export the split audio to MP3
         write_mp3(out_path, sr, split_audio)
+
+        segment["audio_name"] = out_file
 
     # Use ThreadPoolExecutor for concurrent execution
     with ThreadPoolExecutor(max_workers=72) as executor:
@@ -216,7 +250,7 @@ def export_to_mp3(audio, asr_result, folder_path, file_name):
 
         # Wait for all threads to complete
         for future in tqdm.tqdm(
-            futures, total=len(asr_result), desc="导出为 MP3"
+                futures, total=len(asr_result), desc="导出为 MP3"
         ):
             future.result()
 
